@@ -1,0 +1,1044 @@
+#nullable disable
+using NAudio.Wave;
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.IO;
+using System.Windows.Forms;
+
+namespace num1_Project
+{
+    public partial class MainForm : Form
+    {
+        private float[] _fftBuffer = new float[512];
+        private NAudio.Dsp.Complex[] _complexBuffer = new NAudio.Dsp.Complex[512];
+        private int _sampleCount = 0;
+        private WaveOutEvent _waveOut;
+        private AudioFileReader _audioReader;
+        private SongInfo _currentSong;
+        private List<SongInfo> _playlist = new List<SongInfo>();
+        private int _currentIndex = -1;
+        private bool _isDragging = false;
+
+        private readonly Dictionary<int, YearRecord> _db = KoreanMusicDb.Build();
+        private int _currentYear = 2000;
+
+        private System.Windows.Forms.Timer _progressTimer;
+
+        private List<CapsuleInfo> capsuleList = new List<CapsuleInfo>();
+
+
+
+        public MainForm()
+        {
+            InitializeComponent();
+            this.Load += MainForm_Load;
+            DatabaseHelper.InitApi();
+
+            ApplyButtonDesign();
+            InitProgressTimer();
+            WirePlayerEvents();
+
+            this.DoubleBuffered = true;
+
+            if (pnlPlaylist != null)
+            {
+                pnlPlaylist.AutoScroll = true;
+                pnlPlaylist.Resize += pnlPlaylist_Resize;
+            }
+
+            if (dgvChart != null)
+            {
+                typeof(DataGridView).InvokeMember(
+                    "DoubleBuffered",
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.Instance |
+                    System.Reflection.BindingFlags.SetProperty,
+                    null, dgvChart, new object[] { true });
+
+                dgvChart.AutoGenerateColumns = false;
+            }
+
+            if (trkYear != null)
+            {
+                trkYear.Minimum = 1992;
+                trkYear.Maximum = 2026;
+                trkYear.Value = 2000;
+            }
+
+            this.Shown += MainForm_Shown;
+            this.Activated += MainForm_Activated;
+            LoadYear(2000);
+        }
+
+
+        public class VisualizerSampleProvider : NAudio.Wave.ISampleProvider
+        {
+            private readonly NAudio.Wave.ISampleProvider _source;
+            private readonly Action<float> _onSample;
+            public VisualizerSampleProvider(NAudio.Wave.ISampleProvider source, Action<float> onSample)
+            {
+                _source = source;
+                _onSample = onSample;
+            }
+            public NAudio.Wave.WaveFormat WaveFormat => _source.WaveFormat;
+            public int Read(float[] buffer, int offset, int count)
+            {
+                int read = _source.Read(buffer, offset, count);
+                for (int i = 0; i < read; i++) _onSample(buffer[offset + i]);
+                return read;
+            }
+        }
+        private async void MainForm_Load(object sender, EventArgs e)
+        {
+            await RefreshCapsulesAsync();
+        }
+
+        private async void MainForm_Activated(object sender, EventArgs e)
+        {
+            await LoadPlaylistAsync();
+        }
+
+        private async void MainForm_Shown(object sender, EventArgs e)
+        {
+            await LoadPlaylistAsync();
+        }
+
+        private async System.Threading.Tasks.Task LoadPlaylistAsync()
+        {
+            try
+            {
+                _playlist = await DatabaseHelper.GetSongsByGenreAsync("전체");
+                RenderPlaylist();
+            }
+            catch (Exception ex)
+            {
+                pnlPlaylist.Controls.Clear();
+
+                Label lbl = new Label();
+                lbl.Text = "서버에서 음악 목록을 불러오지 못했습니다.\n" + ex.Message;
+                lbl.ForeColor = Color.FromArgb(220, 120, 120);
+                lbl.Font = new Font("맑은 고딕", 10f);
+                lbl.AutoSize = false;
+                lbl.Dock = DockStyle.Fill;
+                lbl.TextAlign = ContentAlignment.MiddleCenter;
+
+                pnlPlaylist.Controls.Add(lbl);
+            }
+        }
+
+        private void RenderPlaylist()
+        {
+            pnlPlaylist.SuspendLayout();
+            pnlPlaylist.Controls.Clear();
+
+            if (_playlist.Count == 0)
+            {
+                Label lbl = new Label();
+                lbl.Text = "서버에 등록된 음악이 없습니다.";
+                lbl.ForeColor = Color.FromArgb(139, 148, 158);
+                lbl.Font = new Font("맑은 고딕", 10f);
+                lbl.AutoSize = false;
+                lbl.Dock = DockStyle.Fill;
+                lbl.TextAlign = ContentAlignment.MiddleCenter;
+                pnlPlaylist.Controls.Add(lbl);
+                pnlPlaylist.ResumeLayout();
+                return;
+            }
+
+            for (int i = 0; i < _playlist.Count; i++)
+            {
+                var song = _playlist[i];
+                Panel row = CreateSongRow(song, i);
+                pnlPlaylist.Controls.Add(row);
+            }
+
+            RelayoutPlaylistRows();
+            HighlightCurrentRow();
+
+            pnlPlaylist.ResumeLayout();
+        }
+
+        private Panel CreateSongRow(SongInfo song, int idx)
+        {
+            Panel row = new Panel();
+            row.Size = new Size(GetPlaylistRowWidth(), 60);
+            row.Location = new Point(0, idx * 62);
+            row.BackColor = idx % 2 == 0
+                             ? Color.FromArgb(22, 27, 34)
+                             : Color.FromArgb(17, 22, 30);
+            row.Cursor = Cursors.Hand;
+            row.Tag = idx;
+            row.Padding = new Padding(8, 6, 8, 6);
+            row.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+
+            PictureBox pic = new PictureBox();
+            pic.Name = "picAlbum";
+            pic.Size = new Size(46, 46);
+            pic.Location = new Point(8, 7);
+            pic.SizeMode = PictureBoxSizeMode.StretchImage;
+            pic.BackColor = Color.FromArgb(46, 117, 182);
+            pic.Tag = idx;
+            SetAlbumArtImage(pic, song.AlbumArtUrl);
+
+            Label lblTitle = new Label();
+            lblTitle.Name = "lblTitle";
+            lblTitle.Text = song.Title;
+            lblTitle.Font = new Font("맑은 고딕", 10f, FontStyle.Bold);
+            lblTitle.ForeColor = Color.FromArgb(230, 237, 243);
+            lblTitle.Location = new Point(64, 8);
+            lblTitle.Size = new Size(Math.Max(120, row.Width - 230), 22);
+            lblTitle.AutoEllipsis = true;
+            lblTitle.Tag = idx;
+
+            Label lblArtist = new Label();
+            lblArtist.Name = "lblArtist";
+            lblArtist.Text = song.Artist;
+            lblArtist.Font = new Font("맑은 고딕", 8.5f);
+            lblArtist.ForeColor = Color.FromArgb(139, 148, 158);
+            lblArtist.Location = new Point(64, 32);
+            lblArtist.Size = new Size(Math.Max(120, row.Width - 230), 18);
+            lblArtist.AutoEllipsis = true;
+            lblArtist.Tag = idx;
+
+
+
+
+            Label lblDur = new Label();
+            lblDur.Name = "lblDur";
+            lblDur.Text = song.DurationText;
+            lblDur.Font = new Font("Consolas", 9f);
+            lblDur.ForeColor = Color.FromArgb(139, 148, 158);
+            lblDur.TextAlign = ContentAlignment.MiddleRight;
+            lblDur.Size = new Size(60, 46);
+            lblDur.Location = new Point(row.Width - 72, 7);
+            lblDur.Tag = idx;
+
+            row.Controls.AddRange(new Control[] { pic, lblTitle, lblArtist, lblDur });
+
+            EventHandler dblClick = (s, e) =>
+            {
+                int i = (int)((Control)s).Tag;
+                PlaySong(i);
+            };
+
+            row.DoubleClick += dblClick;
+            pic.DoubleClick += dblClick;
+            lblTitle.DoubleClick += dblClick;
+            lblArtist.DoubleClick += dblClick;
+            lblDur.DoubleClick += dblClick;
+
+            EventHandler mouseEnter = (s, e) =>
+                row.BackColor = Color.FromArgb(28, 46, 74);
+            EventHandler mouseLeave = (s, e) =>
+                row.BackColor = idx == _currentIndex
+                    ? Color.FromArgb(28, 46, 74)
+                    : idx % 2 == 0
+                        ? Color.FromArgb(22, 27, 34)
+                        : Color.FromArgb(17, 22, 30);
+
+            row.MouseEnter += mouseEnter;
+            pic.MouseEnter += mouseEnter;
+            lblTitle.MouseEnter += mouseEnter;
+            lblArtist.MouseEnter += mouseEnter;
+            lblDur.MouseEnter += mouseEnter;
+
+            row.MouseLeave += mouseLeave;
+            pic.MouseLeave += mouseLeave;
+            lblTitle.MouseLeave += mouseLeave;
+            lblArtist.MouseLeave += mouseLeave;
+            lblDur.MouseLeave += mouseLeave;
+
+            return row;
+        }
+
+
+
+        private void ResetNowPlaying()
+        {
+            lblTitle.Text = "재생 중인 곡 없음";
+            lblArtist.Text = "";
+            albumArt.Image = GetDefaultAlbumArt();
+            lblCurrent.Text = "0:00";
+            lblTotal.Text = "0:00";
+            progressBar1.Value = 0;
+            btnPlay.Text = "▶";
+        }
+
+        private int GetPlaylistRowWidth()
+        {
+            int width = pnlPlaylist.ClientSize.Width - (pnlPlaylist.VerticalScroll.Visible ? SystemInformation.VerticalScrollBarWidth : 0) - 4;
+            return Math.Max(260, width);
+        }
+
+        private void RelayoutPlaylistRows()
+        {
+            if (pnlPlaylist == null)
+                return;
+
+            int y = 0;
+            int rowWidth = GetPlaylistRowWidth();
+
+            foreach (Control control in pnlPlaylist.Controls)
+            {
+                if (control is not Panel row || row.Tag is not int)
+                    continue;
+
+                row.SuspendLayout();
+                row.Location = new Point(0, y);
+                row.Size = new Size(rowWidth, 60);
+
+                foreach (Control child in row.Controls)
+                {
+                    if (child.Name == "picAlbum")
+                    {
+                        child.Location = new Point(8, 7);
+                        child.Size = new Size(46, 46);
+                    }
+                    else if (child.Name == "lblTitle")
+                    {
+                        child.Location = new Point(64, 8);
+                        child.Size = new Size(Math.Max(120, row.Width - 230), 22);
+                    }
+                    else if (child.Name == "lblArtist")
+                    {
+                        child.Location = new Point(64, 32);
+                        child.Size = new Size(Math.Max(120, row.Width - 230), 18);
+                    }
+                    else if (child.Name == "btnDelete")
+                    {
+                        child.Location = new Point(row.Width - 132, 16);
+                        child.Size = new Size(52, 28);
+                    }
+                    else if (child.Name == "lblDur")
+                    {
+                        child.Location = new Point(row.Width - 72, 7);
+                        child.Size = new Size(60, 46);
+                    }
+                }
+
+                row.ResumeLayout();
+                y += 62;
+            }
+
+            pnlPlaylist.AutoScrollMinSize = new Size(0, y + 4);
+        }
+
+        private void pnlPlaylist_Resize(object sender, EventArgs e)
+        {
+            RelayoutPlaylistRows();
+        }
+
+        private void SetAlbumArtImage(PictureBox pictureBox, string imageUrl)
+        {
+            pictureBox.Image = GetDefaultAlbumArt();
+            pictureBox.SizeMode = PictureBoxSizeMode.StretchImage;
+
+            if (string.IsNullOrWhiteSpace(imageUrl))
+                return;
+
+            pictureBox.LoadCompleted += PictureBox_LoadCompleted;
+
+            try
+            {
+                pictureBox.LoadAsync(imageUrl);
+            }
+            catch
+            {
+                pictureBox.Image = GetDefaultAlbumArt();
+            }
+        }
+
+        private void PictureBox_LoadCompleted(object sender, AsyncCompletedEventArgs e)
+        {
+            if (sender is not PictureBox pictureBox)
+                return;
+
+            if (e.Error != null || pictureBox.Image == null)
+                pictureBox.Image = GetDefaultAlbumArt();
+
+            pictureBox.LoadCompleted -= PictureBox_LoadCompleted;
+        }
+
+        private Image GetDefaultAlbumArt()
+        {
+            Bitmap bmp = new Bitmap(46, 46);
+            using var g = Graphics.FromImage(bmp);
+            g.Clear(Color.FromArgb(46, 117, 182));
+            using var font = new Font("Segoe UI Emoji", 18f);
+            g.DrawString("🎵", font, Brushes.White,
+                new RectangleF(0, 0, 46, 46),
+                new StringFormat
+                {
+                    Alignment = StringAlignment.Center,
+                    LineAlignment = StringAlignment.Center
+                });
+            return bmp;
+        }
+
+        private async void PlaySong(int index)
+        {
+            if (index < 0 || index >= _playlist.Count)
+                return;
+
+            try
+            {
+                StopPlayback();
+
+                _currentIndex = index;
+                _currentSong = _playlist[index];
+
+                string localPath = await DatabaseHelper.DownloadSongToCacheAsync(_currentSong);
+
+                if (string.IsNullOrWhiteSpace(localPath) || !File.Exists(localPath))
+                {
+                    MessageBox.Show("파일을 찾을 수 없습니다.", "재생 오류");
+                    return;
+                }
+
+                _audioReader = new AudioFileReader(localPath);
+                _waveOut = new WaveOutEvent();
+                var sampleProvider = _audioReader.ToSampleProvider();
+                //_waveOut.Init(_audioReader);
+                _waveOut.Init(new VisualizerSampleProvider(sampleProvider, sample =>
+                {
+                    _complexBuffer[_sampleCount].X = (float)(sample * NAudio.Dsp.FastFourierTransform.HammingWindow(_sampleCount, 512));
+                    _complexBuffer[_sampleCount].Y = 0;
+                    _sampleCount++;
+
+                    if (_sampleCount >= 512)
+                    {
+                        _sampleCount = 0;
+                        NAudio.Dsp.FastFourierTransform.FFT(true, 9, _complexBuffer);
+                        for (int i = 0; i < 256; i++)
+                        {
+                            _fftBuffer[i] = (float)Math.Sqrt(_complexBuffer[i].X * _complexBuffer[i].X + _complexBuffer[i].Y * _complexBuffer[i].Y);
+                        }
+                    }
+                }));
+
+
+                _waveOut.Volume = volBar.Value / 100f;
+                _waveOut.PlaybackStopped += OnPlaybackStopped;
+                _waveOut.Play();
+
+                UpdateNowPlaying(_currentSong);
+
+                progressBar1.Maximum = Math.Max(1, (int)_audioReader.TotalTime.TotalSeconds);
+                progressBar1.Value = 0;
+                lblTotal.Text = _currentSong.DurationText;
+                lblCurrent.Text = "0:00";
+
+                btnPlay.Text = "⏸";
+
+                await DatabaseHelper.IncrementPlayCountAsync(_currentSong.SongId);
+
+                HighlightCurrentRow();
+                _progressTimer.Start();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"재생 오류: {ex.Message}");
+            }
+            _progressTimer.Start();
+            timerWave.Start();
+        }
+
+        private void UpdateNowPlaying(SongInfo song)
+        {
+            lblTitle.Text = song.Title;
+            lblArtist.Text = $"{song.Artist}  ·  {(song.Year > 0 ? song.Year.ToString() : "")}";
+            SetAlbumArtImage(albumArt, song.AlbumArtUrl);
+        }
+
+        private void HighlightCurrentRow()
+        {
+            foreach (Control c in pnlPlaylist.Controls)
+            {
+                if (c is Panel row && row.Tag is int idx)
+                {
+                    row.BackColor = idx == _currentIndex
+                        ? Color.FromArgb(28, 46, 74)
+                        : idx % 2 == 0
+                            ? Color.FromArgb(22, 27, 34)
+                            : Color.FromArgb(17, 22, 30);
+                }
+            }
+        }
+
+        private void StopPlayback()
+        {
+            _progressTimer?.Stop();
+
+            if (_waveOut != null)
+            {
+                try
+                {
+                    _waveOut.PlaybackStopped -= OnPlaybackStopped;
+                    _waveOut.Stop();
+                }
+                catch
+                {
+                }
+
+                _waveOut.Dispose();
+                _waveOut = null;
+            }
+
+            if (_audioReader != null)
+            {
+                _audioReader.Dispose();
+                _audioReader = null;
+            }
+        }
+
+        private void OnPlaybackStopped(object sender, StoppedEventArgs e)
+        {
+            if (!this.IsHandleCreated || this.IsDisposed)
+                return;
+
+            this.BeginInvoke((Action)(() =>
+            {
+                btnPlay.Text = "▶";
+                _progressTimer.Stop();
+
+                if (_currentSong == null || _playlist.Count == 0)
+                {
+                    ResetNowPlaying();
+                    return;
+                }
+
+                if (_currentIndex + 1 < _playlist.Count)
+                    PlaySong(_currentIndex + 1);
+                else
+                {
+                    if (progressBar1.Maximum > 0)
+                        progressBar1.Value = 0;
+                    lblCurrent.Text = "0:00";
+                }
+            }));
+        }
+
+        private void InitProgressTimer()
+        {
+            _progressTimer = new System.Windows.Forms.Timer();
+            _progressTimer.Interval = 500;
+            _progressTimer.Tick += (s, e) =>
+            {
+                if (_audioReader == null || _isDragging)
+                    return;
+
+                int pos = (int)_audioReader.CurrentTime.TotalSeconds;
+                if (progressBar1.Maximum > 0)
+                    progressBar1.Value = Math.Min(pos, progressBar1.Maximum);
+
+                lblCurrent.Text = $"{pos / 60}:{pos % 60:D2}";
+            };
+        }
+
+        private void WirePlayerEvents()
+        {
+            btnPlay.Click += (s, e) =>
+            {
+                if (_waveOut == null)
+                {
+                    if (_playlist.Count > 0)
+                        PlaySong(0);
+                    return;
+                }
+
+                if (_waveOut.PlaybackState == PlaybackState.Playing)
+                {
+                    _waveOut.Pause();
+                    btnPlay.Text = "▶";
+                    _progressTimer.Stop();
+                }
+                else
+                {
+                    _waveOut.Play();
+                    btnPlay.Text = "⏸";
+                    _progressTimer.Start();
+                }
+            };
+
+            btnPrev.Click += (s, e) =>
+            {
+                if (_currentIndex > 0)
+                    PlaySong(_currentIndex - 1);
+            };
+
+            btnNext.Click += (s, e) =>
+            {
+                if (_currentIndex < _playlist.Count - 1)
+                    PlaySong(_currentIndex + 1);
+            };
+
+            volBar.ValueChanged += (s, e) =>
+            {
+                if (_waveOut != null)
+                    _waveOut.Volume = volBar.Value / 100f;
+            };
+
+            this.FormClosing += (s, e) => StopPlayback();
+        }
+
+        private void MakeControlRound(Control control)
+        {
+            GraphicsPath path = new GraphicsPath();
+            path.AddEllipse(0, 0, control.Width, control.Height);
+            control.Region = new Region(path);
+        }
+
+        private void ApplyButtonDesign()
+        {
+            Button[] buttons = { btnShuffle, btnPrev, btnPlay, btnNext, btnRepeat };
+            foreach (var btn in buttons)
+            {
+                btn.FlatStyle = FlatStyle.Flat;
+                btn.FlatAppearance.BorderSize = 0;
+            }
+
+            btnPlay.Size = new Size(45, 45);
+            btnPlay.BackColor = Color.FromArgb(52, 152, 219);
+            btnPlay.ForeColor = Color.White;
+            btnPlay.Text = "▶";
+            MakeControlRound(btnPlay);
+
+            btnShuffle.Text = "⇄";
+            btnPrev.Text = "⏮";
+            btnNext.Text = "⏭";
+            btnRepeat.Text = "↻";
+
+            btnShuffle.ForeColor = btnRepeat.ForeColor = Color.Gray;
+            btnPrev.ForeColor = btnNext.ForeColor = Color.White;
+        }
+
+        private void RenderCapsules()
+        {
+            flowCards.Controls.Clear();
+
+            foreach (CapsuleInfo capsule in capsuleList)
+                flowCards.Controls.Add(CreateCapsuleCard(capsule));
+
+            flowCards.Controls.Add(CreateAddCard());
+        }
+
+        private Panel CreateAddCard()
+        {
+            Panel card = new Panel();
+            card.Size = new Size(240, 200);
+            card.BackColor = Color.FromArgb(13, 23, 38);
+            card.Margin = new Padding(10);
+            card.Cursor = Cursors.Hand;
+
+            Label lblPlus = new Label();
+            lblPlus.Text = "+";
+            lblPlus.ForeColor = Color.FromArgb(150, 170, 200);
+            lblPlus.Font = new Font("맑은 고딕", 28, FontStyle.Regular);
+            lblPlus.AutoSize = false;
+            lblPlus.Size = new Size(240, 60);
+            lblPlus.Location = new Point(0, 60);
+            lblPlus.TextAlign = ContentAlignment.MiddleCenter;
+            lblPlus.Cursor = Cursors.Hand;
+
+            Label lblText = new Label();
+            lblText.Text = "새 캡슐 만들기";
+            lblText.ForeColor = Color.FromArgb(150, 170, 200);
+            lblText.Font = new Font("맑은 고딕", 11, FontStyle.Regular);
+            lblText.AutoSize = false;
+            lblText.Size = new Size(240, 30);
+            lblText.Location = new Point(0, 130);
+            lblText.TextAlign = ContentAlignment.MiddleCenter;
+            lblText.Cursor = Cursors.Hand;
+
+            card.Controls.Add(lblPlus);
+            card.Controls.Add(lblText);
+            card.Click += OpenCreateCapsuleForm;
+            lblPlus.Click += OpenCreateCapsuleForm;
+            lblText.Click += OpenCreateCapsuleForm;
+
+            return card;
+        }
+
+        private Panel CreateCapsuleCard(CapsuleInfo capsule)
+        {
+            Panel card = new Panel();
+            card.Size = new Size(240, 200);
+            card.BackColor = Color.FromArgb(13, 23, 38);
+            card.Margin = new Padding(10);
+
+            Panel topPanel = new Panel();
+            topPanel.Size = new Size(240, 60);
+            topPanel.Location = new Point(0, 0);
+            topPanel.BackColor = capsule.IsOpenable
+                ? Color.FromArgb(24, 61, 52)
+                : Color.FromArgb(31, 53, 77);
+            card.Controls.Add(topPanel);
+
+            Label lblIcon = new Label();
+            lblIcon.AutoSize = false;
+            lblIcon.Size = new Size(240, 30);
+            lblIcon.Location = new Point(0, 18);
+            lblIcon.TextAlign = ContentAlignment.MiddleCenter;
+            lblIcon.ForeColor = Color.White;
+            lblIcon.Font = new Font("맑은 고딕", 16, FontStyle.Bold);
+            lblIcon.Text = capsule.IsOpenable ? "✉" : "🔒";
+            card.Controls.Add(lblIcon);
+
+            Label lblCapsuleTitle = new Label();
+            lblCapsuleTitle.Text = capsule.Title;
+            lblCapsuleTitle.ForeColor = Color.White;
+            lblCapsuleTitle.Font = new Font("맑은 고딕", 12, FontStyle.Bold);
+            lblCapsuleTitle.AutoSize = false;
+            lblCapsuleTitle.Size = new Size(240, 30);
+            lblCapsuleTitle.Location = new Point(0, 75);
+            lblCapsuleTitle.TextAlign = ContentAlignment.MiddleCenter;
+            card.Controls.Add(lblCapsuleTitle);
+
+            Label lblSongCount = new Label();
+            lblSongCount.Text = $"{capsule.Songs.Count}곡";
+            lblSongCount.ForeColor = Color.FromArgb(160, 180, 200);
+            lblSongCount.Font = new Font("맑은 고딕", 9);
+            lblSongCount.AutoSize = false;
+            lblSongCount.Size = new Size(240, 20);
+            lblSongCount.Location = new Point(0, 105);
+            lblSongCount.TextAlign = ContentAlignment.MiddleCenter;
+            card.Controls.Add(lblSongCount);
+
+            if (capsule.IsOpenable)
+            {
+                Button btnOpen = new Button();
+                btnOpen.Text = "캡슐 열기";
+                btnOpen.Size = new Size(170, 40);
+                btnOpen.Location = new Point(35, 145);
+                btnOpen.BackColor = Color.FromArgb(46, 160, 97);
+                btnOpen.ForeColor = Color.White;
+                btnOpen.FlatStyle = FlatStyle.Flat;
+                btnOpen.FlatAppearance.BorderSize = 0;
+                btnOpen.Font = new Font("맑은 고딕", 10, FontStyle.Bold);
+                btnOpen.Click += (s, e) =>
+                {
+                    string songs = string.Join(Environment.NewLine, capsule.Songs);
+                    MessageBox.Show($"캡슐 이름: {capsule.Title}\n\n노래 목록:\n{songs}", "캡슐 열기");
+                };
+                card.Controls.Add(btnOpen);
+            }
+            else
+            {
+                Panel bottomPanel = new Panel();
+                bottomPanel.Size = new Size(170, 50);
+                bottomPanel.Location = new Point(35, 140);
+                bottomPanel.BackColor = Color.FromArgb(24, 41, 63);
+
+                Label lblBottom = new Label();
+                lblBottom.Text = $"개봉까지\r\nD-{capsule.DDay}";
+                lblBottom.Dock = DockStyle.Fill;
+                lblBottom.TextAlign = ContentAlignment.MiddleCenter;
+                lblBottom.ForeColor = Color.DeepSkyBlue;
+                lblBottom.Font = new Font("맑은 고딕", 10, FontStyle.Bold);
+
+                bottomPanel.Controls.Add(lblBottom);
+                card.Controls.Add(bottomPanel);
+            }
+
+            return card;
+        }
+
+        private async void OpenCreateCapsuleForm(object sender, EventArgs e)
+        {
+            using (var form = new CreateCapsuleForm())
+            {
+                if (form.ShowDialog() == DialogResult.OK)
+                {
+                    capsuleList = await DatabaseHelper.GetMyCapsulesAsync();
+                    RenderCapsules();
+                }
+            }
+        }
+
+        private void btnCreateTop_Click(object sender, EventArgs e)
+        {
+            OpenCreateCapsuleForm(sender, e);
+        }
+
+
+        // 송현우: LordYear에 async 구문 추가. -> 뉴스 데이터베이스 입력 적용 후 윈폼과 연결 과정.
+        private async void LoadYear(int year)
+        {
+            _currentYear = year;
+            lblYearNum.Text = year.ToString();
+            lblFooter.Text = $"WorldBeat · {year}년 한국 가요 HOT 차트 기준";
+
+            lstNews.Items.Clear();
+            dgvChart?.Rows.Clear();
+
+            var newsList = await DatabaseHelper.GetNewsByYearAsync(year);
+            foreach (var n in newsList)
+                lstNews.Items.Add(n);
+
+            YearRecord rec = null;
+            int best = int.MaxValue;
+
+            foreach (var kv in _db)
+            {
+                int d = Math.Abs(kv.Key - year);
+                if (d < best) { best = d; rec = kv.Value; }
+            }
+
+            if (rec != null && dgvChart != null)
+            {
+                dgvChart.SuspendLayout();
+                foreach (var s in rec.Songs)
+                    dgvChart.Rows.Add(s.Rank.ToString("D2"), s.Title, s.Artist, s.Genre, s.Note);
+                dgvChart.ResumeLayout();
+            }
+
+            tabMain.Invalidate(true);
+        }
+
+        private void pnlYearCtrl_Resize(object sender, EventArgs e)
+        {
+            int slW = pnlYearCtrl.Width - 310;
+            trkYear.Width = slW;
+            btnNext.Left = trkYear.Right + 6;
+            lblMax.Left = trkYear.Right - 4;
+        }
+
+        private void trkYear_ValueChanged(object sender, EventArgs e)
+        {
+            LoadYear(trkYear.Value);
+        }
+
+        private void btnpreView_Click(object sender, EventArgs e)
+        {
+            if (trkYear.Value > trkYear.Minimum)
+                trkYear.Value--;
+        }
+
+        private void btnNexts_Click(object sender, EventArgs e)
+        {
+            if (trkYear.Value < trkYear.Maximum)
+                trkYear.Value++;
+        }
+
+        /* 송현우 코드 교체. -> 윈폼 실행 시 뉴스 화면에서 같은 부분 여러 개 나옴. */
+        private void lstNews_MouseClick(object sender, MouseEventArgs e)
+        {
+            int idx = lstNews.IndexFromPoint(e.Location);
+            if (idx < 0 || idx >= lstNews.Items.Count)
+                return;
+
+            var item = lstNews.Items[idx] as NewsItem;
+            if (item == null)
+                return;
+
+            new NewsDetailForm(item).Show(this);
+        }
+
+        private void pnlHeader_Paint(object sender, PaintEventArgs e)
+        {
+            var p = (Panel)sender;
+            e.Graphics.DrawLine(new Pen(Color.FromArgb(33, 38, 45)), 0, p.Height - 1, p.Width, p.Height - 1);
+        }
+
+        private void pnlYearCtrl_Paint(object sender, PaintEventArgs e)
+        {
+            var p = (Panel)sender;
+            e.Graphics.DrawLine(new Pen(Color.FromArgb(33, 38, 45)), 0, 0, p.Width, 0);
+            e.Graphics.DrawLine(new Pen(Color.FromArgb(33, 38, 45)), 0, p.Height - 1, p.Width, p.Height - 1);
+        }
+
+        private void pnlFooter_Paint(object sender, PaintEventArgs e)
+        {
+            e.Graphics.DrawLine(new Pen(Color.FromArgb(33, 38, 45)), 0, 0, ((Panel)sender).Width, 0);
+        }
+
+        private void tabMain_DrawItem(object sender, DrawItemEventArgs e)
+        {
+            var tab = (TabControl)sender;
+            var page = tab.TabPages[e.Index];
+            bool sel = e.Index == tab.SelectedIndex;
+
+            using (var bg = new SolidBrush(sel ? Color.FromArgb(22, 27, 34) : Color.FromArgb(13, 17, 23)))
+                e.Graphics.FillRectangle(bg, e.Bounds);
+
+            if (sel)
+                e.Graphics.FillRectangle(
+                    new SolidBrush(Color.FromArgb(88, 166, 255)),
+                    new Rectangle(e.Bounds.X, e.Bounds.Bottom - 2, e.Bounds.Width, 2));
+
+            var sf = new StringFormat
+            {
+                Alignment = StringAlignment.Center,
+                LineAlignment = StringAlignment.Center
+            };
+
+            e.Graphics.DrawString(
+                page.Text,
+                new Font("맑은 고딕", 9f, sel ? FontStyle.Bold : FontStyle.Regular),
+                new SolidBrush(sel ? Color.FromArgb(88, 166, 255) : Color.FromArgb(139, 148, 158)),
+                e.Bounds, sf);
+        }
+
+        private void lstNews_DrawItem(object sender, DrawItemEventArgs e)
+        {
+            if (e.Index < 0)
+                return;
+
+            var g = e.Graphics;
+
+            bool hov = (e.State & DrawItemState.Selected) != 0;
+            Color bg = hov
+                ? Color.FromArgb(28, 46, 74)
+                : (e.Index % 2 == 0 ? Color.FromArgb(17, 22, 30) : Color.FromArgb(13, 17, 23));
+
+            g.FillRectangle(new SolidBrush(bg), e.Bounds);
+
+            var badge = new Rectangle(e.Bounds.X + 14, e.Bounds.Y + 13, 22, 22);
+            g.FillEllipse(new SolidBrush(Color.FromArgb(46, 117, 182)), badge);
+
+            var sfC = new StringFormat
+            {
+                Alignment = StringAlignment.Center,
+                LineAlignment = StringAlignment.Center
+            };
+
+            g.DrawString((e.Index + 1).ToString(),
+                new Font("Consolas", 8f, FontStyle.Bold),
+                Brushes.White,
+                badge,
+                sfC);
+
+            var item = lstNews.Items[e.Index] as NewsItem;
+            string headline = item?.Headline ?? lstNews.Items[e.Index].ToString();
+
+            var sfL = new StringFormat
+            {
+                LineAlignment = StringAlignment.Center
+            };
+
+            g.DrawString(headline,
+                new Font("맑은 고딕", 10.5f),
+                new SolidBrush(hov ? Color.FromArgb(230, 237, 243) : Color.FromArgb(200, 210, 220)),
+                new RectangleF(e.Bounds.X + 46, e.Bounds.Y, e.Bounds.Width - 60, e.Bounds.Height),
+                sfL);
+
+            g.DrawString("›",
+                new Font("맑은 고딕", 16f),
+                new SolidBrush(hov ? Color.FromArgb(88, 166, 255) : Color.FromArgb(50, 88, 166, 255)),
+                new RectangleF(e.Bounds.Right - 28, e.Bounds.Y, 22, e.Bounds.Height),
+                sfL);
+
+            g.DrawLine(new Pen(Color.FromArgb(25, 255, 255, 255)),
+                e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
+        }
+
+        private void timerWave_Tick(object sender, EventArgs e)
+        {
+            pictureBoxWave.Invalidate();
+        }
+
+
+        private void pictureBoxWave_Paint(object sender, PaintEventArgs e)
+        {
+            //pictureBoxWave_Paint함수에 넣어주기 !
+            if (_waveOut == null || _waveOut.PlaybackState != NAudio.Wave.PlaybackState.Playing)
+            {
+                e.Graphics.DrawLine(Pens.DimGray, 0, pictureBoxWave.Height / 2, pictureBoxWave.Width, pictureBoxWave.Height / 2);
+                return;
+            }
+
+            e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+
+            // 막대 두께 12, 간격 2 유지
+            int barWidth = 12;
+            int gap = 2;
+            int maxBars = pictureBoxWave.Width / (barWidth + gap);
+
+            for (int i = 0; i < maxBars; i++)
+            {
+                float ratio = (float)i / maxBars;
+
+                int dataIndex = (int)(Math.Pow(ratio, 1.2) * 255);
+
+
+                float rawVal = _fftBuffer[Math.Clamp(dataIndex, 0, 255)];
+                float boostedVal = (float)Math.Sqrt(rawVal) * 1200; // 작은 신호를 위로 끌어올림
+
+                float finalVal = boostedVal * (1.0f + ratio * 2.0f); // 고음역대 추가 보정
+
+
+                int barHeight = (int)Math.Clamp(finalVal, 5, pictureBoxWave.Height - 5);
+
+                int x = i * (barWidth + gap);
+                int y = (pictureBoxWave.Height - barHeight) / 2;
+
+                //그라데이션 색상 적용
+                using (var brush = new System.Drawing.Drawing2D.LinearGradientBrush(
+                    new Rectangle(x, y, barWidth, barHeight),
+                    Color.HotPink,
+                    Color.DeepSkyBlue,
+                    System.Drawing.Drawing2D.LinearGradientMode.Vertical))
+                {
+                    e.Graphics.FillRectangle(brush, x, y, barWidth, barHeight);
+                }
+            }
+        }
+
+        private async Task RefreshCapsulesAsync()
+        {
+            capsuleList = await DatabaseHelper.GetMyCapsulesAsync();
+            RenderCapsules();
+        }
+
+
+        private void btnPlay1_Paint(object sender, PaintEventArgs e) //버튼 디자인 꾸밀때 쓰는 함수 (새로 추가함)
+        {
+
+        }
+
+        private void pnlVisualizer_Paint(object sender, PaintEventArgs e) //이벤트 발생 잘못 시킴 ㅋ
+        {
+
+        }
+
+        private void btnPlay1_Click(object sender, EventArgs e) //버튼으로 유류브 링크 들어가는 함수 (새로 추가함)
+        {
+            string url = "https://www.youtube.com/";
+
+            try
+            {
+
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = url,
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception ex)
+            {
+
+                MessageBox.Show("링크를 열 수 없습니다: " + ex.Message); //혹시 모를 예외문
+            }
+        }
+
+        private void btnPlay1_MouseDown(object sender, MouseEventArgs e)
+        {
+            btnPlay1.FlatAppearance.BorderSize = 2;
+            btnPlay1.FlatAppearance.BorderColor = Color.HotPink;
+        }
+
+        private void btnPlay1_MouseUp(object sender, MouseEventArgs e)
+        {
+            btnPlay1.FlatAppearance.BorderSize = 0;
+        }
+
+        private void pictureBox1_Paint(object sender, PaintEventArgs e)
+        {
+           
+        }
+    }
+
+}
