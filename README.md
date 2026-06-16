@@ -1,6 +1,6 @@
 # C# WinForm 음악 플레이어 및 실시간 오디오 시각화
 
-C# Windows Forms를 이용해 음악 재생, 재생목록 확인, 볼륨 조절 및 실시간 주파수 그래프 기능을 구현한 팀 프로젝트입니다.
+C# Windows Forms를 이용해 실제 음악 미디어 프로그램과 유사한 플랫톰을 구현한 팀 프로젝트입니다.
 
 NAudio로 재생 중인 오디오 데이터를 가져오고 FFT를 적용하여, 음악의 주파수 변화가 막대그래프로 실시간 표시되도록 구현했습니다.
 
@@ -27,32 +27,17 @@ NAudio로 재생 중인 오디오 데이터를 가져오고 FFT를 적용하여,
 
 ## 메인 화면
 
-음악 플레이어와 재생목록, 최근 재생 목록 및 많이 들은 음악을 한 화면에서 확인할 수 있도록 구성했습니다.
-
 ![메인 화면](./docs/images/main_screen.png)
 
 ---
 
 ## 음악 재생 화면
 
-앨범 이미지, 노래 제목, 재생 바, 재생 버튼과 볼륨 조절 기능을 배치했습니다.
-
-- 음악 재생 및 일시정지
-- 이전 곡 및 다음 곡 이동
-- 반복 재생
-- 재생 위치 확인 및 변경
-- 볼륨 조절
-- 실시간 주파수 그래프 출력
-
 ![음악 재생 화면](./docs/images/player_screen.png)
 
 ---
 
 ## 음악 재생목록
-
-음악 제목, 가수, 앨범 이미지와 재생 시간을 목록으로 표시했습니다.
-
-현재 선택된 음악의 배경색을 다르게 표시하여 사용자가 재생 중인 곡을 쉽게 확인할 수 있도록 구성했습니다.
 
 ![음악 재생목록](./docs/images/playlist.png)
 
@@ -71,7 +56,7 @@ NAudio로 오디오 샘플 수집
     ↓
 FFT를 이용해 주파수 값으로 변환
     ↓
-주파수 값에 따라 그래프 높이 변경
+주파수 값에 따라 그래프 높낮이 변경
 ```
 
 ![실시간 오디오 그래프](./docs/images/audio_spectrum.png)
@@ -134,20 +119,3 @@ FFT를 이용해 주파수 값으로 변환
 
 ---
 
-## 저장소 구성
-
-```text
-mp3-media-player
-├── MainForm.cs
-├── Mainform.Extrea.cs
-├── mainform.playlist.cs
-├── README.md
-└── docs
-    └── images
-        ├── main_screen.png
-        ├── player_screen.png
-        ├── playlist.png
-        ├── audio_spectrum.png
-        ├── audio_spectrum_code.png
-        └── youtube_link_code.png
-```
